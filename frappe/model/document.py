@@ -12,6 +12,8 @@ from frappe.model.naming import set_new_name
 from werkzeug.exceptions import NotFound, Forbidden
 import hashlib, json
 from frappe.model import optional_fields
+from frappe.utils.file_manager import save_url
+
 
 # once_only validation
 # methods
@@ -203,6 +205,10 @@ class Document(BaseDocument):
 
 		self.run_method("after_insert")
 		self.flags.in_insert = True
+		
+		if self.get("amended_from"):
+			self.copy_attachments_from_amended_from()
+
 		self.run_post_save_methods()
 		self.flags.in_insert = False
 
@@ -264,6 +270,16 @@ class Document(BaseDocument):
 
 		return self
 
+	def copy_attachments_from_amended_from(self):
+		'''Copy attachments from `amended_from`'''
+		from frappe.desk.form.load import get_attachments
+				
+		#loop through attachments
+		for attach_item in get_attachments(self.doctype, self.amended_from):
+			
+			#save attachments to new doc
+			save_url(attach_item.file_url, attach_item.file_name, self.doctype, self.name, "Home/Attachments")
+	
 	def update_children(self):
 		'''update child tables'''
 		for df in self.meta.get_table_fields():
@@ -285,12 +301,16 @@ class Document(BaseDocument):
 			return
 
 		if rows:
-			# delete rows that do not match the ones in the
-			# document
-			frappe.db.sql("""delete from `tab{0}` where parent=%s
+			# select rows that do not match the ones in the document
+			deleted_rows = frappe.db.sql("""select name from `tab{0}` where parent=%s
 				and parenttype=%s and parentfield=%s
 				and name not in ({1})""".format(df.options, ','.join(['%s'] * len(rows))),
 					[self.name, self.doctype, fieldname] + rows)
+			if len(deleted_rows) > 0:
+				# delete rows that do not match the ones in the document
+				frappe.db.sql("""delete from `tab{0}` where name in ({1})""".format(df.options,
+					','.join(['%s'] * len(deleted_rows))), tuple(row[0] for row in deleted_rows))
+
 		else:
 			# no rows found, delete all rows
 			frappe.db.sql("""delete from `tab{0}` where parent=%s
@@ -481,7 +501,7 @@ class Document(BaseDocument):
 				modified = frappe.db.sql('''select value from tabSingles
 					where doctype=%s and field='modified' for update''', self.doctype)
 				modified = modified and modified[0][0]
-				if cstr(modified) and cstr(modified) != cstr(self._original_modified):
+				if modified and modified != cstr(self._original_modified):
 					conflict = True
 			else:
 				tmp = frappe.db.sql("""select modified, docstatus from `tab{0}`
